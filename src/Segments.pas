@@ -8,7 +8,7 @@ uses
 type
   TSegmentType = (stRoot, stFile, stFunction, stClass);
 
-  TSegmentClassType = (sctCODE = 1, sctICODE = 2, sctDATA = 3, sctBSS = 4, sctTLS = 5, sctPDATA = 6);
+  TSegmentClassType = (sctUNKNOWN = 0, sctCODE = 1, sctICODE = 2, sctDATA = 3, sctBSS = 4, sctTLS = 5, sctPDATA = 6);
 
   TSegment = class(TObjectList<TSegment>)
   strict private
