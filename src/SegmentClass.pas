@@ -6,30 +6,35 @@ uses
   System.Generics.Collections;
 
 type
-  TSegmentClass = class
+  TMapClass = record
   strict private
-    FID: Integer;
+    FID: UInt8;
+    FAddress: UInt64;
+    FSize: UInt64;
     FName: String;
     FClassName: String;
   public
-    constructor Create(AID: Integer; const AName, AClassName: String);
-    property ID: Integer read FID;
+    class function Create(AID: UInt8; AAdress, ASize: UInt64; const AName, AClassName: String): TMapClass; static;
+    property ID: UInt8 read FID;
+    property Address: UInt64 read FAddress;
+    property Size: UInt64 read FSize;
     property Name: String read FName;
-    property ClassName: String read FClassName;
+    property _ClassName: String read FClassName;
   end;
 
-  TSegmentClasses = TObjectDictionary<Integer, TSegmentClass>;
+  TMapClasses = TDictionary<ShortInt, TMapClass>;
 
 implementation
 
 { TSegmentClass }
 
-constructor TSegmentClass.Create(AID: Integer; const AName, AClassName: String);
+class function  TMapClass.Create(AID: UInt8; AAdress, ASize: UInt64; const AName, AClassName: String): TMapClass;
 begin
-  inherited Create;
-  FID := AID;
-  FName := AName;
-  FClassName := AClassName;
+  Result.FID := AID;
+  Result.FAddress := AAdress;
+  Result.FSize := ASize;
+  Result.FName := AName;
+  Result.FClassName := AClassName;
 end;
 
 end.

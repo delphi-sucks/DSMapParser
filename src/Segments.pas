@@ -3,12 +3,27 @@ unit Segments;
 interface
 
 uses
-  System.Generics.Collections;
+  System.Generics.Collections,
+  Publics;
 
 type
   TSegmentType = (stRoot, stFile, stFunction, stClass);
 
   TSegmentClassType = (sctUNKNOWN = 0, sctCODE = 1, sctICODE = 2, sctDATA = 3, sctBSS = 4, sctTLS = 5, sctPDATA = 6);
+
+  TSegmentClass = record
+  strict private
+    FAddress: UInt64;
+    FSize: UInt64;
+    FGroup: String;
+    FACBP: SmallInt;
+  public
+    class function Create(AAddress, ASize: UInt64; AGroup: String; AACBP: SmallInt): TSegmentClass; static;
+    property Address: UInt64 read FAddress;
+    property Size: UInt64 read FSize;
+    property Group: String read FGroup;
+    property ACBP: Smallint read FACBP;
+  end;
 
   TSegment = class(TObjectList<TSegment>)
   strict private
@@ -16,24 +31,30 @@ type
     FSegmentType: TSegmentType;
     FParent: TSegment;
     FName: String;
-    FSize: Array[1..6] of UInt64;
     FVisible: Boolean;
-    function GetSize(SegmentClassType: TSegmentClassType): UInt64;
-    function GetSizeSum(SegmentClassType: TSegmentClassType): UInt64;
-    function GetSizeVisible(SegmentClassType: TSegmentClassType): UInt64;
+    FClasses: TArray<TSegmentClass>;
+    FClassCount: ShortInt;
+    FPublics: TObjectList<TPublic>;
+    function GetSize(AID: UInt8): UInt64;
+    function GetSizeSum(AID: UInt8): UInt64;
+    function GetSizeVisible(AID: UInt8): UInt64;
+    function GetClass(AID: UInt8): TSegmentClass;
   public
-    constructor Create(SegmentType: TSegmentType; const Name: String);
+    constructor Create(AClassCount: ShortInt; ASegmentType: TSegmentType; const AName: String);
     destructor Destroy; override;
     procedure Add(AName: String; ASegment: TSegment);
-    procedure SetSize(ASegmentClassType: TSegmentClassType; ASize: UInt64);
+    procedure SetClassInfo(AID: UInt8; AAddress, ALength: UInt64; AGroup: String; AACBP: SmallInt);
     function TryGetValue(AName: String; out ASegment: TSegment): Boolean;
+    function ContainsKey(AName: String): Boolean;
     function GetFullName: String;
     property SegmentType: TSegmentType read FSegmentType;
     property Name: String read FName;
-    property Size[Index: TSegmentClassType]: UInt64 read GetSize;
-    property SizeSum[Index: TSegmentClassType]: UInt64 read GetSizeSum;
-    property SizeVisible[Index: TSegmentClassType]: UInt64 read GetSizeVisible;
+    property Size[Index: UInt8]: UInt64 read GetSize;
+    property SizeSum[Index: UInt8]: UInt64 read GetSizeSum;
+    property SizeVisible[Index: UInt8]: UInt64 read GetSizeVisible;
     property Visible: Boolean read FVisible write FVisible;
+    property _ClassInfo[Index: UInt8]: TSegmentClass read GetClass;
+    property Publics: TObjectList<TPublic> read FPublics;
   end;
 
 implementation
@@ -48,19 +69,40 @@ begin
   ASegment.FParent := Self;
 end;
 
-constructor TSegment.Create(SegmentType: TSegmentType; const Name: String);
+function TSegment.ContainsKey(AName: String): Boolean;
+begin
+  Result := FDictionary.ContainsKey(AName);
+end;
+
+constructor TSegment.Create(AClassCount: ShortInt; ASegmentType: TSegmentType; const AName: String);
+var
+  i1: Integer;
 begin
   inherited Create;
+  FPublics := TObjectList<TPublic>.Create;
+  FClassCount := AClassCount;
+  SetLength(FClasses, FClassCount);
+  for i1 := 0 to FClassCount - 1 do
+  begin
+    FClasses[i1] := TSegmentClass.Create(0, 0, EmptyStr, 0);
+  end;
+
   FDictionary := TObjectDictionary<String, TSegment>.Create;
-  FSegmentType := SegmentType;
-  FName := Name;
+  FSegmentType := ASegmentType;
+  FName := AName;
   FVisible := True;
 end;
 
 destructor TSegment.Destroy;
 begin
   FreeAndNil(FDictionary);
+  FreeAndNil(FPublics);
   inherited;
+end;
+
+function TSegment.GetClass(AID: UInt8): TSegmentClass;
+begin
+  Result := FClasses[AID];
 end;
 
 function TSegment.GetFullName: String;
@@ -77,12 +119,18 @@ begin
   end;
 end;
 
-function TSegment.GetSize(SegmentClassType: TSegmentClassType): UInt64;
+function TSegment.GetSize(AID: UInt8): UInt64;
 begin
-  Result := FSize[Ord(SegmentClassType)];
+  if AID > FClassCount then
+  begin
+    Result := 0;
+  end else
+  begin
+    Result := _ClassInfo[AID - 1].Size;
+  end;
 end;
 
-function TSegment.GetSizeSum(SegmentClassType: TSegmentClassType): UInt64;
+function TSegment.GetSizeSum(AID: UInt8): UInt64;
 
   function IterateSize(ASegment: TSegment): UInt64;
   var
@@ -91,15 +139,15 @@ function TSegment.GetSizeSum(SegmentClassType: TSegmentClassType): UInt64;
     Result := 0;
     for Segment in ASegment do
     begin
-      Result := Result + Segment.Size[SegmentClassType] + IterateSize(Segment);
+      Result := Result + Segment.Size[AID] + IterateSize(Segment);
     end;
   end;
 
 begin
-  Result := Size[SegmentClassType] + IterateSize(Self);
+  Result := Size[AID] + IterateSize(Self);
 end;
 
-function TSegment.GetSizeVisible(SegmentClassType: TSegmentClassType): UInt64;
+function TSegment.GetSizeVisible(AID: UInt8): UInt64;
 
   function IterateSize(ASegment: TSegment): UInt64;
   var
@@ -110,23 +158,33 @@ function TSegment.GetSizeVisible(SegmentClassType: TSegmentClassType): UInt64;
     begin
       if Segment.Visible then
       begin
-        Result := Result + Segment.Size[SegmentClassType] + IterateSize(Segment);
+        Result := Result + Segment.Size[AID] + IterateSize(Segment);
       end;
     end;
   end;
 
 begin
-  Result := Size[SegmentClassType] + IterateSize(Self);
+  Result := Size[AID] + IterateSize(Self);
 end;
 
-procedure TSegment.SetSize(ASegmentClassType: TSegmentClassType; ASize: UInt64);
+procedure TSegment.SetClassInfo(AID: UInt8; AAddress, ALength: UInt64; AGroup: String; AACBP: SmallInt);
 begin
-  FSize[Ord(ASegmentClassType)] := ASize;
+  FClasses[AID - 1] := TSegmentClass.Create(AAddress, ALength, AGroup, AACBP);
 end;
 
 function TSegment.TryGetValue(AName: String; out ASegment: TSegment): Boolean;
 begin
   Result := FDictionary.TryGetValue(AName, ASegment);
+end;
+
+{ TSegmentClass }
+
+class function TSegmentClass.Create(AAddress, ASize: UInt64; AGroup: String; AACBP: SmallInt): TSegmentClass;
+begin
+  Result.FAddress := AAddress;
+  Result.FSize := ASize;
+  Result.FGroup := AGroup;
+  Result.FACBP := AACBP;
 end;
 
 end.

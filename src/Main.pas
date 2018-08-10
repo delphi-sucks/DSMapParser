@@ -4,10 +4,11 @@ interface
 
 uses
   System.Classes,
-  Vcl.Controls, Vcl.Dialogs, System.Actions, Vcl.ActnMan, Vcl.Forms, Vcl.ActnCtrls,
+  Vcl.Controls, Vcl.Dialogs, System.Actions, Vcl.ActnMan, Vcl.Forms, Vcl.ActnCtrls, Vcl.ImgList,
   Vcl.ToolWin, Vcl.ActnMenus, Vcl.ActnList, Vcl.PlatformDefaultStyleActnCtrls, Vcl.ComCtrls, Vcl.StdCtrls,
+  System.UITypes,
   VirtualTrees,
-  Parser;
+  Parser, System.ImageList, Vcl.Menus;
 
 type
   TfrmMain = class(TForm)
@@ -22,6 +23,10 @@ type
     barStatus: TStatusBar;
     actCalcuateSumByVisible: TAction;
     actHideNullValues: TAction;
+    FindDialog: TFindDialog;
+    ImageList: TImageList;
+    mnuSegments: TPopupMenu;
+    mnuCopy: TMenuItem;
     procedure actCalcuateSumByVisibleExecute(Sender: TObject);
     procedure actHideNullValuesExecute(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
@@ -33,6 +38,9 @@ type
         Result: Integer);
     procedure treSegmentsGetHint(Sender: TBaseVirtualTree; Node: PVirtualNode; Column: TColumnIndex; var LineBreakStyle:
         TVTTooltipLineBreakStyle; var HintText: string);
+    procedure treSegmentsGetImageIndex(Sender: TBaseVirtualTree; Node:
+        PVirtualNode; Kind: TVTImageKind; Column: TColumnIndex; var Ghosted:
+        Boolean; var ImageIndex: TImageIndex);
     procedure treSegmentsGetText(Sender: TBaseVirtualTree; Node: PVirtualNode; Column: TColumnIndex; TextType:
         TVSTTextType; var CellText: string);
     procedure treSegmentsInitChildren(Sender: TBaseVirtualTree; Node: PVirtualNode; var ChildCount: Cardinal);
@@ -42,6 +50,7 @@ type
     FCalculateSumByVisible: Boolean;
     FHideNullValues: Boolean;
     FParser: TParser;
+    procedure InitHeaderColumns;
     procedure Search(AText: String);
     procedure SetErrorMessage(const AMessage: String);
     function SizeAsKiB(ASize: UInt64): String;
@@ -55,8 +64,9 @@ implementation
 {$R *.dfm}
 
 uses
-  System.SysUtils, System.RegularExpressions,
-  Segments;
+  Winapi.Windows,
+  System.SysUtils, System.RegularExpressions, System.Generics.Collections, System.Generics.Defaults, System.StrUtils,
+  Segments, SegmentClass, Publics;
 
 procedure TfrmMain.actCalcuateSumByVisibleExecute(Sender: TObject);
 begin
@@ -75,6 +85,60 @@ begin
   FreeAndNil(FParser);
 end;
 
+procedure TfrmMain.InitHeaderColumns;
+var
+  Column: TVirtualTreeColumn;
+  MapClass: TMapClass;
+  MapClasses: TList<TMapClass>;
+begin
+  with treSegments.Header.Columns do
+  begin
+    BeginUpdate;
+    try
+      Clear;
+      // Text
+      Add;
+
+      // Typ
+      Column := Add;
+      Column.Text := 'Typ';
+
+      MapClasses := TList<TMapClass>.Create;
+      try
+        for MapClass in FParser.MapClasses.Values do
+        begin
+          MapClasses.Add(MapClass);
+        end;
+        MapClasses.Sort(TComparer<TMapClass>.Construct(
+          function(const Left, Right: TMapClass): Integer
+          begin
+            Result := Left.ID - Right.ID;
+          end
+        ));
+        for MapClass in MapClasses do
+        begin
+          Column := Add;
+          Column.CaptionAlignment := taCenter;
+          Column.Text := 'Size (' + MapClass._ClassName + ')';
+          Column.Tag := MapClass.ID;
+          Column.Options := Column.Options + [coWrapCaption, coUseCaptionAlignment];
+
+          Column := Add;
+          Column.CaptionAlignment := taCenter;
+          Column.Text := 'Sum (' + MapClass._ClassName + ')';
+          Column.Tag := MapClass.ID;
+          Column.Options := Column.Options + [coWrapCaption, coUseCaptionAlignment];
+        end;
+      finally
+        FreeAndNil(MapClasses);
+      end;
+    finally
+      EndUpdate;
+    end;
+  end;
+  treSegments.Header.AutoSizeIndex := 0;
+end;
+
 procedure TfrmMain.Search(AText: String);
 var
   RegEx: TRegEx;
@@ -83,10 +147,13 @@ var
 
   procedure SetNodeVisible(ANode: PVirtualNode; AVisible: Boolean);
   var
-    Segment: TSegment;
+    _Object: TObject;
   begin
-    Segment := treSegments.GetNodeData<TSegment>(ANode);
-    Segment.Visible := AVisible;
+    _Object := treSegments.GetNodeData<TObject>(ANode);
+    if _Object is TSegment then
+    begin
+      (_Object as TSegment).Visible := AVisible;
+    end;
     treSegments.IsVisible[ANode] := AVisible;
   end;
 
@@ -101,7 +168,7 @@ var
       Result := RegEx.IsMatch(AText);
     end else
     begin
-      Result := AText.ToLower.Contains(SearchText);
+      Result := ContainsText(AText, SearchText);
     end;
   end;
 
@@ -179,11 +246,8 @@ begin
         Exit;
       end;
     end;
-    SearchText := AText;
-  end else
-  begin
-    SearchText := AText.ToLower;
   end;
+  SearchText := AText;
   treSegments.BeginUpdate;
   try
     node := treSegments.GetFirst;
@@ -238,6 +302,9 @@ begin
       treSegments.Clear;
       edtSearch.Text := EmptyStr;
       FParser.LoadFromFile(FileOpenDialog.FileName);
+      InitHeaderColumns;
+
+
       treSegments.RootNodeCount := 1;
       treSegments.Refresh;
       treSegments.Header.AutoFitColumns(False);
@@ -260,342 +327,219 @@ end;
 procedure TfrmMain.treSegmentsCompareNodes(Sender: TBaseVirtualTree; Node1, Node2: PVirtualNode; Column: TColumnIndex;
     var Result: Integer);
 var
+  _Object1: TObject;
+  _Object2: TObject;
   Segment1: TSegment;
   Segment2: TSegment;
+  _Public1: TPublic;
+  _Public2: TPublic;
+  ID: UInt8;
+  Title: String;
 begin
-  Segment1 := Sender.GetNodeData<TSegment>(Node1);
-  Segment2 := Sender.GetNodeData<TSegment>(Node2);
-  case Column of
-    0:
-      begin
+  if Column = -1 then
+  begin
+    Exit;
+  end;
+  _Object1 := Sender.GetNodeData<TObject>(Node1);
+  _Object2 := Sender.GetNodeData<TObject>(Node2);
+  if (_Object1 is TSegment)
+  and (_Object2 is TPublic) then
+  begin
+    Result := 1;
+    Exit;
+  end;
+  if (_Object1 is TPublic)
+  and (_Object2 is TSegment) then
+  begin
+    Result := -1;
+    Exit;
+  end;
+  if (_Object1 is TSegment)
+  and (_Object2 is TSegment) then
+  begin
+    Segment1 := _Object1 as TSegment;
+    Segment2 := _Object2 as TSegment;
+    case Column of
+      0:
         Result := CompareText(Segment1.Name, Segment2.Name);
-      end;
-    1:
-      begin
+      1:
         Result := Ord(Segment1.SegmentType) - Ord(Segment2.SegmentType);
-      end;
-    2:
-      begin
-        Result := Segment1.Size[sctCODE] - Segment2.Size[sctCODE];
-      end;
-    3:
+    else
+      ID := Sender.Header.Columns[Column].Tag;
+      Title := Sender.Header.Columns[Column].Text;
+      if Title.StartsWith('Sum') then
       begin
         if FCalculateSumByVisible then
         begin
-          Result := Segment1.SizeVisible[sctCODE] - Segment2.SizeVisible[sctCODE];
+          Result := Segment1.SizeVisible[ID] - Segment2.SizeVisible[ID];
         end else
         begin
-          Result := Segment1.SizeSum[sctCODE] - Segment2.SizeSum[sctCODE];
+          Result := Segment1.SizeSum[ID] - Segment2.SizeSum[ID];
         end;
-      end;
-    4:
+      end else
       begin
-        Result := Segment1.Size[sctICODE] - Segment2.Size[sctICODE];
+        Result := Segment1.Size[ID] - Segment2.Size[ID];
       end;
-    5:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          Result := Segment1.SizeVisible[sctICODE] - Segment2.SizeVisible[sctICODE];
-        end else
-        begin
-          Result := Segment1.SizeSum[sctICODE] - Segment2.SizeSum[sctICODE];
-        end;
-      end;
-    6:
-      begin
-        Result := Segment1.Size[sctDATA] - Segment2.Size[sctDATA];
-      end;
-    7:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          Result := Segment1.SizeVisible[sctDATA] - Segment2.SizeVisible[sctDATA];
-        end else
-        begin
-          Result := Segment1.SizeSum[sctDATA] - Segment2.SizeSum[sctDATA];
-        end;
-      end;
-    8:
-      begin
-        Result := Segment1.Size[sctBSS] - Segment2.Size[sctBSS];
-      end;
-    9:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          Result := Segment1.SizeVisible[sctBSS] - Segment2.SizeVisible[sctBSS];
-        end else
-        begin
-          Result := Segment1.SizeSum[sctBSS] - Segment2.SizeSum[sctBSS];
-        end;
-      end;
-    10:
-      begin
-        Result := Segment1.Size[sctTLS] - Segment2.Size[sctTLS];
-      end;
-    11:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          Result := Segment1.SizeVisible[sctTLS] - Segment2.SizeVisible[sctTLS];
-        end else
-        begin
-          Result := Segment1.SizeSum[sctTLS] - Segment2.SizeSum[sctTLS];
-        end;
-      end;
-    12:
-      begin
-        Result := Segment1.Size[sctPDATA] - Segment2.Size[sctPDATA];
-      end;
-    13:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          Result := Segment1.SizeVisible[sctPDATA] - Segment2.SizeVisible[sctPDATA];
-        end else
-        begin
-          Result := Segment1.SizeSum[sctPDATA] - Segment2.SizeSum[sctPDATA];
-        end;
-      end;
+    end;
+    Exit;
+  end;
+  if (_Object1 is TPublic)
+  and (_Object2 is TPublic) then
+  begin
+    _Public1 := _Object1 as TPublic;
+    _Public2 := _Object2 as TPublic;
+    Exit;
   end;
 end;
 
 procedure TfrmMain.treSegmentsGetHint(Sender: TBaseVirtualTree; Node: PVirtualNode; Column: TColumnIndex; var
     LineBreakStyle: TVTTooltipLineBreakStyle; var HintText: string);
 var
-  Segment:  TSegment;
+  _Object: TObject;
+  Segment: TSegment;
+  _Public: TPublic;
+  ID: UInt8;
+  Title: String;
 begin
-  Segment := Sender.GetNodeData<TSegment>(Node);
-  case Column of
-    0:
-      begin
+  _Object := Sender.GetNodeData<TObject>(Node);
+  if _Object is TSegment then
+  begin
+    Segment := _Object as TSegment;
+    case Column of
+      0:
         HintText := Segment.GetFullName;
-      end;
-    1:
-      begin
+      1:
         case Segment.SegmentType of
           stRoot:
-            begin
-              HintText := 'Root';
-            end;
+            HintText := 'Root';
           stFile:
-            begin
-              HintText := 'File';
-            end;
+            HintText := 'File';
           stFunction:
-            begin
-              HintText := 'Function';
-            end;
+            HintText := 'Function';
           stClass:
-            begin
-              HintText := 'Class';
-            end;
+            HintText := 'Class';
         end;
-      end;
-    2:
-      begin
-        HintText := Segment.Size[sctCODE].ToString + ' Byte';
-      end;
-    3:
+    else
+      ID := Sender.Header.Columns[Column].Tag;
+      Title := Sender.Header.Columns[Column].Text;
+      if Title.StartsWith('Sum') then
       begin
         if FCalculateSumByVisible then
         begin
-          HintText := Segment.SizeVisible[sctCODE].ToString + ' Byte';
+          HintText := Segment.SizeVisible[ID].ToString + ' Byte';
         end else
         begin
-          HintText := Segment.SizeSum[sctCODE].ToString + ' Byte';
+          HintText := Segment.SizeSum[ID].ToString + ' Byte';
         end;
-      end;
-    4:
+      end else
       begin
-        HintText := Segment.Size[sctICODE].ToString + ' Byte';
+        HintText := Segment.Size[ID].ToString + ' Byte';
       end;
-    5:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          HintText := Segment.SizeVisible[sctICODE].ToString + ' Byte';
-        end else
-        begin
-          HintText := Segment.SizeSum[sctICODE].ToString + ' Byte';
-        end;
+    end;
+    Exit;
+  end;
+  if _Object is TPublic then
+  begin
+    _Public := _Object as TPublic;
+    Exit;
+  end;
+end;
+
+procedure TfrmMain.treSegmentsGetImageIndex(Sender: TBaseVirtualTree; Node:
+    PVirtualNode; Kind: TVTImageKind; Column: TColumnIndex; var Ghosted:
+    Boolean; var ImageIndex: TImageIndex);
+var
+  _Object: TObject;
+  Segment: TSegment;
+  _Public: TPublic;
+begin
+  if (Kind in [ikNormal, ikSelected])
+  and (Column = 0) then
+  begin
+    _Object := Sender.GetNodeData<TObject>(Node);
+    if _Object is TSegment then
+    begin
+      Segment := _Object as TSegment;
+      case Segment.SegmentType of
+        stFile:
+          ImageIndex := 0;
+        stClass:
+          ImageIndex := 1;
       end;
-    6:
-      begin
-        HintText := Segment.Size[sctDATA].ToString + ' Byte';
-      end;
-    7:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          HintText := Segment.SizeVisible[sctDATA].ToString + ' Byte';
-        end else
-        begin
-          HintText := Segment.SizeSum[sctDATA].ToString + ' Byte';
-        end;
-      end;
-    8:
-      begin
-        HintText := Segment.Size[sctBSS].ToString + ' Byte';
-      end;
-    9:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          HintText := Segment.SizeVisible[sctBSS].ToString + ' Byte';
-        end else
-        begin
-          HintText := Segment.SizeSum[sctBSS].ToString + ' Byte';
-        end;
-      end;
-    10:
-      begin
-        HintText := Segment.Size[sctTLS].ToString + ' Byte';
-      end;
-    11:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          HintText := Segment.SizeVisible[sctTLS].ToString + ' Byte';
-        end else
-        begin
-          HintText := Segment.SizeSum[sctTLS].ToString + ' Byte';
-        end;
-      end;
-    12:
-      begin
-        HintText := Segment.Size[sctPDATA].ToString + ' Byte';
-      end;
-    13:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          HintText := Segment.SizeVisible[sctPDATA].ToString + ' Byte';
-        end else
-        begin
-          HintText := Segment.SizeSum[sctPDATA].ToString + ' Byte';
-        end;
-      end;
+      Exit;
+    end;
+    if _Object is TPublic then
+    begin
+      _Public := _Object as TPublic;
+      Exit;
+    end;
   end;
 end;
 
 procedure TfrmMain.treSegmentsGetText(Sender: TBaseVirtualTree; Node: PVirtualNode; Column: TColumnIndex; TextType:
     TVSTTextType; var CellText: string);
 var
-  Segment:  TSegment;
+  _Object: TObject;
+  Segment: TSegment;
+  _Public: TPublic;
+  ID: UInt8;
+  Title: String;
 begin
-  Segment := Sender.GetNodeData<TSegment>(Node);
-  case Column of
-    0:
-      begin
+  _Object := Sender.GetNodeData<TObject>(Node);
+  if _Object is TSegment then
+  begin
+    Segment := _Object as TSegment;
+    case Column of
+      0:
         CellText := Segment.Name;
-      end;
-    1:
-      begin
-        case Segment.SegmentType of
-          stRoot:
-            begin
-              CellText := 'Root';
-            end;
-          stFile:
-            begin
-              CellText := 'File';
-            end;
-          stFunction:
-            begin
-              CellText := 'Function';
-            end;
-          stClass:
-            begin
-              CellText := 'Class';
-            end;
+      1:
+        begin
+          case Segment.SegmentType of
+            stRoot:
+              begin
+                CellText := 'Root';
+              end;
+            stFile:
+              begin
+                CellText := 'File';
+              end;
+            stFunction:
+              begin
+                CellText := 'Function';
+              end;
+            stClass:
+              begin
+                CellText := 'Class';
+              end;
+          end;
         end;
-      end;
-    2:
-      begin
-        CellText := SizeAsKiB(Segment.Size[sctCODE]);
-      end;
-    3:
+    else
+      ID := Sender.Header.Columns[Column].Tag;
+      Title := Sender.Header.Columns[Column].Text;
+      if Title.StartsWith('Sum') then
       begin
         if FCalculateSumByVisible then
         begin
-          CellText := SizeAsKiB(Segment.SizeVisible[sctCODE]);
+          CellText := SizeAsKiB(Segment.SizeVisible[ID]);
         end else
         begin
-          CellText := SizeAsKiB(Segment.SizeSum[sctCODE]);
+          CellText := SizeAsKiB(Segment.SizeSum[ID]);
         end;
-      end;
-    4:
+      end else
       begin
-        CellText := SizeAsKiB(Segment.Size[sctICODE]);
+        CellText := SizeAsKiB(Segment.Size[ID]);
       end;
-    5:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          CellText := SizeAsKiB(Segment.SizeVisible[sctICODE]);
-        end else
-        begin
-          CellText := SizeAsKiB(Segment.SizeSum[sctICODE]);
-        end;
-      end;
-    6:
-      begin
-        CellText := SizeAsKiB(Segment.Size[sctDATA]);
-      end;
-    7:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          CellText := SizeAsKiB(Segment.SizeVisible[sctDATA]);
-        end else
-        begin
-          CellText := SizeAsKiB(Segment.SizeSum[sctDATA]);
-        end;
-      end;
-    8:
-      begin
-        CellText := SizeAsKiB(Segment.Size[sctBSS]);
-      end;
-    9:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          CellText := SizeAsKiB(Segment.SizeVisible[sctBSS]);
-        end else
-        begin
-          CellText := SizeAsKiB(Segment.SizeSum[sctBSS]);
-        end;
-      end;
-    10:
-      begin
-        CellText := SizeAsKiB(Segment.Size[sctTLS]);
-      end;
-    11:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          CellText := SizeAsKiB(Segment.SizeVisible[sctTLS]);
-        end else
-        begin
-          CellText := SizeAsKiB(Segment.SizeSum[sctTLS]);
-        end;
-      end;
-    12:
-      begin
-        CellText := SizeAsKiB(Segment.Size[sctPDATA]);
-      end;
-    13:
-      begin
-        if FCalculateSumByVisible then
-        begin
-          CellText := SizeAsKiB(Segment.SizeVisible[sctPDATA]);
-        end else
-        begin
-          CellText := SizeAsKiB(Segment.SizeSum[sctPDATA]);
-        end;
-      end;
+    end;
+    Exit;
+  end;
+  if _Object is TPublic then
+  begin
+    _Public := _Object as TPublic;
+    case Column of
+      0:
+        CellText := _Public.Name;
+    end;
+    Exit;
   end;
 end;
 
@@ -606,14 +550,16 @@ begin
   Segment := Sender.GetNodeData<TSegment>(Node);
   if Segment <> nil then
   begin
-    ChildCount := Segment.Count;
+    ChildCount := Segment.Count + Segment.Publics.Count;
   end;
 end;
 
 procedure TfrmMain.treSegmentsInitNode(Sender: TBaseVirtualTree; ParentNode, Node: PVirtualNode; var InitialStates:
     TVirtualNodeInitStates);
 var
-  Segment:  TSegment;
+  Segment: TSegment;
+  _Public: TPublic;
+  ParentSegment: TSegment;
 begin
   InitialStates := [];
   if ParentNode = nil then
@@ -622,13 +568,26 @@ begin
     InitialStates := InitialStates + [ivsExpanded];
   end else
   begin
-    Segment := Sender.GetNodeData<TSegment>(ParentNode).Items[Node.Index];
+    ParentSegment := Sender.GetNodeData<TSegment>(ParentNode);
+    if Node.Index < ParentSegment.Count then
+    begin
+      Segment := ParentSegment.Items[Node.Index];
+    end else
+    begin
+      _Public := ParentSegment.Publics.Items[Node.Index - ParentSegment.Count];
+      Sender.SetNodeData<TPublic>(Node, _Public);
+      Exit;
+    end;
   end;
-  if Segment.Count > 0 then
+  if Segment <> nil then
   begin
-    InitialStates := InitialStates + [ivsHasChildren];
+    if (Segment.Count > 0)
+    or (Segment.Publics.Count > 0) then
+    begin
+      InitialStates := InitialStates + [ivsHasChildren];
+    end;
+    Sender.SetNodeData<TSegment>(Node, Segment);
   end;
-  Sender.SetNodeData<TSegment>(Node, Segment);
 end;
 
 end.
